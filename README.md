@@ -63,6 +63,8 @@ the flat format, not a shortcut taken here.
 - Process names may contain spaces (in `flatten` output) or commas (in
   `nest` output, since only the first two commas are treated as field
   separators) — whatever the source data has is passed through as-is.
+- `nest` rejects a flat dump where a pid is its own ancestor (directly
+  or through a chain of ppids) instead of recursing forever.
 
 ## Building
 
