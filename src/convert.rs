@@ -103,37 +103,72 @@ pub fn nest<R: BufRead, W: Write>(reader: R, writer: &mut W) -> io::Result<()> {
     }
 
     for root in roots {
-        let mut path = HashSet::new();
-        print_subtree(root, 0, &names, &children, &mut path, writer)?;
+        print_subtree(root, &names, &children, writer)?;
     }
     Ok(())
+}
+
+// A frame per open branch, walked with an explicit stack instead of
+// function recursion. A real /proc dump can nest deep enough (a stuck
+// fork bomb, a container's control group hierarchy) to blow the call
+// stack if each level were a recursive call; this way traversal depth
+// only costs a Vec push, not a stack frame.
+struct Frame {
+    pid: u32,
+    depth: usize,
+    next_child: usize,
+}
+
+fn write_process(
+    pid: u32,
+    depth: usize,
+    names: &HashMap<u32, String>,
+    writer: &mut impl Write,
+) -> io::Result<()> {
+    let name = names.get(&pid).map(|s| s.as_str()).unwrap_or("?");
+    writeln!(writer, "{}{} {}", "  ".repeat(depth), pid, name)
 }
 
 // `path` holds the pids on the current root-to-node branch. A flat dump
 // is just a list of (pid, ppid) pairs, so nothing stops the input from
 // claiming a pid is its own ancestor; without this check that shows up
-// as unbounded recursion instead of a readable error.
+// as an infinite loop instead of a readable error.
 fn print_subtree(
-    pid: u32,
-    depth: usize,
+    root: u32,
     names: &HashMap<u32, String>,
     children: &HashMap<u32, Vec<u32>>,
-    path: &mut HashSet<u32>,
     writer: &mut impl Write,
 ) -> io::Result<()> {
-    if !path.insert(pid) {
-        return Err(invalid(format!("cycle detected: pid {pid} is its own ancestor")));
-    }
+    let mut path = HashSet::new();
+    path.insert(root);
+    write_process(root, 0, names, writer)?;
 
-    let name = names.get(&pid).map(|s| s.as_str()).unwrap_or("?");
-    writeln!(writer, "{}{} {}", "  ".repeat(depth), pid, name)?;
-    if let Some(kids) = children.get(&pid) {
-        for &kid in kids {
-            print_subtree(kid, depth + 1, names, children, path, writer)?;
+    let mut stack = vec![Frame { pid: root, depth: 0, next_child: 0 }];
+
+    while let Some(frame) = stack.last_mut() {
+        let next = children
+            .get(&frame.pid)
+            .and_then(|kids| kids.get(frame.next_child));
+
+        match next {
+            Some(&kid) => {
+                frame.next_child += 1;
+                if !path.insert(kid) {
+                    return Err(invalid(format!(
+                        "cycle detected: pid {kid} is its own ancestor"
+                    )));
+                }
+                let depth = frame.depth + 1;
+                write_process(kid, depth, names, writer)?;
+                stack.push(Frame { pid: kid, depth, next_child: 0 });
+            }
+            None => {
+                path.remove(&frame.pid);
+                stack.pop();
+            }
         }
     }
 
-    path.remove(&pid);
     Ok(())
 }
 
@@ -199,6 +234,27 @@ mod tests {
     fn nest_rejects_self_cycle() {
         let err = nest_str("1,0,init\n5,5,stuck\n").unwrap_err();
         assert!(err.to_string().contains("cycle detected"));
+    }
+
+    #[test]
+    fn nest_handles_a_deep_chain_iteratively() {
+        // each pid's parent is the one before it, so this is a single
+        // branch a thousand levels deep - the kind of input a recursive
+        // walk of the tree could blow the stack on.
+        let depth = 1000;
+        let mut input = String::new();
+        input.push_str("1,0,p1\n");
+        for pid in 2..=depth {
+            input.push_str(&format!("{pid},{},p{pid}\n", pid - 1));
+        }
+
+        let out = nest_str(&input).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), depth as usize);
+        assert_eq!(lines[0], "1 p1");
+        assert_eq!(lines[1], "  2 p2");
+        let last = format!("{}{} p{}", "  ".repeat(depth as usize - 1), depth, depth);
+        assert_eq!(lines[depth as usize - 1], last);
     }
 
     #[test]

@@ -64,7 +64,10 @@ the flat format, not a shortcut taken here.
   `nest` output, since only the first two commas are treated as field
   separators) — whatever the source data has is passed through as-is.
 - `nest` rejects a flat dump where a pid is its own ancestor (directly
-  or through a chain of ppids) instead of recursing forever.
+  or through a chain of ppids) instead of looping forever.
+- `nest` walks the tree with an explicit stack rather than recursive
+  calls, so converting a very deep tree (thousands of levels) will not
+  overflow the call stack.
 
 ## Building
 
